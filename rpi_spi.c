@@ -1,5 +1,7 @@
+// spi_capture.c - High-speed SPI data capture from Teensy 4.x
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>  // Added for uint8_t definition
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -14,6 +16,10 @@
 #define SPI_SPEED 32000000  // 32 MHz
 
 static int running = 1;
+
+// Forward declaration of functions
+int setup_spi(int speed);
+int read_spi_buffer(int fd, uint8_t *buffer, size_t size);
 
 void signal_handler(int sig) {
     running = 0;
@@ -49,7 +55,7 @@ int setup_spi(int speed) {
     return fd;
 }
 
-int read_buffer(int fd, uint8_t *buffer, size_t size) {
+int read_spi_buffer(int fd, uint8_t *buffer, size_t size) {
     struct spi_ioc_transfer tr = {
         .tx_buf = (unsigned long)NULL,
         .rx_buf = (unsigned long)buffer,
@@ -65,6 +71,7 @@ int read_buffer(int fd, uint8_t *buffer, size_t size) {
 int main(int argc, char *argv[]) {
     int buffer_count = 10;
     int display_stats = 0;
+    int save_to_file = 1;  // Default save to file
     char filename[256] = "capture.bin";
     
     // Parse arguments
@@ -77,6 +84,8 @@ int main(int argc, char *argv[]) {
             i++;
         } else if (strcmp(argv[i], "--display") == 0) {
             display_stats = 1;
+        } else if (strcmp(argv[i], "--no-save") == 0) {
+            save_to_file = 0;
         }
     }
     
@@ -96,16 +105,19 @@ int main(int argc, char *argv[]) {
     }
     
     // Open output file
-    FILE *outfile = fopen(filename, "wb");
-    if (!outfile) {
-        perror("Error opening output file");
-        free(buffer);
-        close(spi_fd);
-        return 1;
+    FILE *outfile = NULL;
+    if (save_to_file) {
+        outfile = fopen(filename, "wb");
+        if (!outfile) {
+            perror("Error opening output file");
+            free(buffer);
+            close(spi_fd);
+            return 1;
+        }
+        printf("Saving data to %s\n", filename);
     }
     
     printf("SPI initialized at %d MHz\n", SPI_SPEED/1000000);
-    printf("Saving data to %s\n", filename);
     
     // Timing
     struct timespec start, end;
@@ -118,7 +130,7 @@ int main(int argc, char *argv[]) {
         // Read full buffer in chunks
         for (size_t offset = 0; offset < BUFFER_SIZE && running; offset += READ_SIZE) {
             size_t chunk_size = (offset + READ_SIZE > BUFFER_SIZE) ? (BUFFER_SIZE - offset) : READ_SIZE;
-            int bytes_read = read_buffer(spi_fd, buffer + offset, chunk_size);
+            int bytes_read = read_spi_buffer(spi_fd, buffer + offset, chunk_size);
             if (bytes_read < 0) {
                 perror("SPI transfer failed");
                 running = 0;
@@ -128,7 +140,9 @@ int main(int argc, char *argv[]) {
         
         // Write to file
         if (running) {
-            fwrite(buffer, 1, BUFFER_SIZE, outfile);
+            if (outfile) {
+                fwrite(buffer, 1, BUFFER_SIZE, outfile);
+            }
             total_bytes += BUFFER_SIZE;
             
             if (display_stats) {
@@ -151,7 +165,9 @@ int main(int argc, char *argv[]) {
     printf("  Throughput: %.2f MB/s (%.2f Mbps)\n", mbytes_per_sec, mbps);
     
     // Clean up
-    fclose(outfile);
+    if (outfile) {
+        fclose(outfile);
+    }
     free(buffer);
     close(spi_fd);
     

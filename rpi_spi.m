@@ -1,15 +1,21 @@
 % filepath: e:\Roshan\aiCAS IIT Bombay\C2S\RPI_SPI\rpi_spi.m
-% Create a Raspberry Pi object
+% Create a Raspberry Pi object with verbose output
 rpi = raspi();
 
 % Define data ready pin (connected to Teensy pin 14)
 dataReadyPin = 25;  % Using GPIO 25 as mentioned earlier
 
+% Configure data ready pin as digital input
 configurePin(rpi, dataReadyPin, 'DigitalInput');
-disp('Starting SPI Transaction with Double Buffer');
+disp('Starting SPI Debug Mode');
 
-% Create an SPI device object
-spiDev = spidev(rpi, 'CE0', 0, 16000000); % 16 MHz SPI clock
+% Create an SPI device object - slower clock for debugging
+spiDev = spidev(rpi, 'CE0', 0, 8000000); % 8 MHz SPI clock for stability
+
+% Small test read to verify SPI functionality
+disp('Testing SPI connection with small read...');
+testByte = writeRead(spiDev, uint8(0));
+fprintf('SPI test read returned: %d (0x%02X)\n', testByte, testByte);
 
 % Buffer size to match Teensy implementation
 BUFFER_SIZE = 4096;
@@ -18,12 +24,26 @@ try
     % Set a timeout for the polling loop
     timeout = 120; % seconds
     startTime = tic;
-    transactionCount = 0;
+    
+    disp('Checking initial data ready pin state...');
+    initialState = readDigitalPin(rpi, dataReadyPin);
+    fprintf('Initial data ready pin state: %d\n', initialState);
     
     disp('Waiting for data ready signal...');
+    transactionCount = 0;
     
-    % Polling loop with debounce logic improved for no pull-down
+    % Polling loop with debug info
     while toc(startTime) < timeout
+        % Print progress every 5 seconds
+        if mod(floor(toc(startTime)), 5) == 0
+            persistent lastReport
+            if isempty(lastReport) || floor(toc(startTime)) > lastReport
+                fprintf('Waiting... Time elapsed: %.1f seconds\n', toc(startTime));
+                fprintf('Current data ready pin state: %d\n', readDigitalPin(rpi, dataReadyPin));
+                lastReport = floor(toc(startTime));
+            end
+        end
+        
         % Read pin state
         pinState = readDigitalPin(rpi, dataReadyPin);
         
@@ -31,6 +51,7 @@ try
             % Debounce with multiple readings to confirm HIGH
             pause(0.005); % 5ms pause
             if readDigitalPin(rpi, dataReadyPin)  % Second reading
+                fprintf('Data ready pin detected HIGH at %.2f seconds\n', toc(startTime));
                 pause(0.005); % 5ms pause
                 if readDigitalPin(rpi, dataReadyPin)  % Third reading for certainty
                     transactionCount = transactionCount + 1;
@@ -42,10 +63,20 @@ try
                     % Start time measurement
                     txTime = tic;
                     
-                    % Read data in chunks
-                    for i = 1:BUFFER_SIZE
-                        % Send dummy byte to trigger the Teensy to send its data
-                        receivedData(i) = writeRead(spiDev, uint8(0));
+                    % Read in smaller chunks with progress reporting
+                    chunkSize = 128; 
+                    for chunk = 1:chunkSize:BUFFER_SIZE
+                        endIdx = min(chunk + chunkSize - 1, BUFFER_SIZE);
+                        
+                        % Read each byte within the chunk
+                        for i = chunk:endIdx
+                            receivedData(i) = writeRead(spiDev, uint8(0));
+                        end
+                        
+                        % Progress report every 1024 bytes
+                        if mod(chunk, 1024) == 1
+                            fprintf('Read %d of %d bytes...\n', endIdx, BUFFER_SIZE);
+                        end
                     end
                     
                     % Calculate transfer rate
@@ -56,13 +87,13 @@ try
                     fprintf('Received %d bytes in %.3f seconds (%.2f bytes/sec)\n', ...
                         length(receivedData), elapsed, transferRate);
                     
-                    fprintf('First 10 bytes: ');
-                    for i = 1:min(10, length(receivedData))
+                    fprintf('First 16 bytes: ');
+                    for i = 1:min(16, length(receivedData))
                         fprintf('%d ', receivedData(i));
                     end
                     fprintf('\n');
                     
-                    % Check that data ready signal went LOW before continuing
+                    % Check that data ready signal went LOW
                     disp('Waiting for data ready signal to go LOW');
                     waitTime = tic;
                     
@@ -81,6 +112,8 @@ try
                         disp('Data ready signal went LOW - Ready for next transaction');
                     else
                         disp('Warning: Data ready signal timed out waiting for LOW');
+                        % Force a small delay before trying again
+                        pause(1.0);
                     end
                 end
             end
@@ -93,6 +126,7 @@ try
     
 catch exception
     disp(['Error: ', exception.message]);
+    disp(['Stack: ', getReport(exception)]);
 end
 
 % Clean up

@@ -1,4 +1,4 @@
-% filepath: e:\Roshan\aiCAS IIT Bombay\C2S\RPI_SPI\rpi_spi_fixed.m
+% filepath: e:\Roshan\aiCAS IIT Bombay\C2S\RPI_SPI\rpi_spi_chunked.m
 % Create a Raspberry Pi object
 rpi = raspi();
 
@@ -7,17 +7,18 @@ dataReadyPin = 25;
 
 % Configure data ready pin as digital input
 configurePin(rpi, dataReadyPin, 'DigitalInput');
-disp('Starting SPI High-Speed Mode with Robust Handling');
+disp('Starting SPI with Chunked Transfer Mode');
 
-% Create an SPI device object with faster clock
+% Create an SPI device object
 spiDev = spidev(rpi, 'CE0', 0, 8000000); % 8 MHz SPI clock
 
 % Buffer size to match Teensy implementation
-BUFFER_SIZE = 4096;
+TOTAL_BUFFER_SIZE = 4096;
+CHUNK_SIZE = 256; % Maximum chunk size for Raspberry Pi MATLAB SPI
 
 try
     % Set a timeout for the polling loop
-    timeout = 120; % seconds
+    timeout = 180; % seconds (extended for multiple chunks)
     startTime = tic;
     transactionCount = 0;
     
@@ -35,7 +36,7 @@ try
             end
         end
         
-        % Check for data ready signal with debounce
+        % Check for data ready signal
         if readDigitalPin(rpi, dataReadyPin)
             % Double-check with delay for debounce
             pause(0.01);
@@ -43,42 +44,69 @@ try
                 transactionCount = transactionCount + 1;
                 fprintf('\nTransaction #%d - Data ready detected\n', transactionCount);
                 
-                % Create dummy data array for bulk transfer
-                dummyArray = uint8(zeros(1, BUFFER_SIZE));
+                % Allocate buffer for complete data
+                fullBuffer = uint8(zeros(1, TOTAL_BUFFER_SIZE));
                 
                 % Start timing the transfer
                 txTime = tic;
                 
-                % Bulk transfer mode
-                receivedData = writeRead(spiDev, dummyArray);
+                % Read in chunks of CHUNK_SIZE
+                numChunks = ceil(TOTAL_BUFFER_SIZE / CHUNK_SIZE);
                 
-                % Calculate transfer rate
+                fprintf('Reading %d bytes in %d chunks of %d bytes each\n', ...
+                    TOTAL_BUFFER_SIZE, numChunks, CHUNK_SIZE);
+                
+                for chunk = 1:numChunks
+                    % Calculate start and end indices for this chunk
+                    startIdx = (chunk-1) * CHUNK_SIZE + 1;
+                    endIdx = min(chunk * CHUNK_SIZE, TOTAL_BUFFER_SIZE);
+                    chunkLength = endIdx - startIdx + 1;
+                    
+                    % Create dummy data for this chunk
+                    dummyChunk = uint8(zeros(1, chunkLength));
+                    
+                    % Read the chunk
+                    chunkStart = tic;
+                    receivedChunk = writeRead(spiDev, dummyChunk);
+                    chunkTime = toc(chunkStart);
+                    
+                    % Store in full buffer
+                    fullBuffer(startIdx:endIdx) = receivedChunk;
+                    
+                    % Report progress
+                    fprintf('Chunk %d/%d: Read %d bytes in %.3f seconds (%.2f bytes/sec)\n', ...
+                        chunk, numChunks, chunkLength, chunkTime, chunkLength/chunkTime);
+                    
+                    % Short pause between chunks
+                    pause(0.01);
+                end
+                
+                % Calculate overall transfer rate
                 elapsed = toc(txTime);
-                transferRate = BUFFER_SIZE / elapsed;
+                transferRate = TOTAL_BUFFER_SIZE / elapsed;
                 
-                fprintf('Received %d bytes in %.3f seconds (%.2f bytes/sec)\n', ...
-                    length(receivedData), elapsed, transferRate);
+                fprintf('\nTotal: Received %d bytes in %.3f seconds (%.2f bytes/sec)\n', ...
+                    TOTAL_BUFFER_SIZE, elapsed, transferRate);
                 
-                % Show sample of received data
+                % Display data samples
                 fprintf('First 16 bytes: ');
-                for i = 1:min(16, length(receivedData))
-                    fprintf('%d ', receivedData(i));
+                for i = 1:min(16, length(fullBuffer))
+                    fprintf('%d ', fullBuffer(i));
                 end
                 fprintf('\n');
                 
-                % Check if data looks valid
-                uniqueValues = length(unique(receivedData));
+                % Check data validity
+                uniqueValues = length(unique(fullBuffer));
                 fprintf('Unique values in data: %d\n', uniqueValues);
                 
-                % Wait for data ready signal to go LOW with reliable detection
+                % Wait for data ready signal to go LOW
                 disp('Waiting for data ready signal to go LOW...');
                 waitTime = tic;
                 lowDetected = false;
                 
-                % Improved waiting with timeout and multiple checks
                 while toc(waitTime) < 5
                     if ~readDigitalPin(rpi, dataReadyPin)
-                        % Confirm LOW state with double-check
+                        % Confirm LOW state
                         pause(0.02);
                         if ~readDigitalPin(rpi, dataReadyPin)
                             lowDetected = true;
@@ -93,9 +121,11 @@ try
                     disp('Ready for next transaction');
                 else
                     disp('WARNING: Data ready signal timed out waiting for LOW');
-                    disp('Check Teensy connections and code');
-                    % Add a forced pause to let things recover
-                    pause(1.0);
+                    disp('Forcing data ready LOW by software');
+                    configurePin(rpi, dataReadyPin, 'DigitalOutput', 0);
+                    pause(0.1);
+                    configurePin(rpi, dataReadyPin, 'DigitalInput');
+                    pause(0.5);
                 end
             end
         end
